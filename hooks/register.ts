@@ -24,10 +24,13 @@ import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
 const HANDOFF_PROMPT = `The conversation above is about to be compacted: everything before this point will be replaced by a summary. You still see all of it. Write the handoff note you will read right after the compaction, so the session goes on as the same collaboration rather than a fresh start from a summary.
 
-Write it in the first person, as notes to yourself, in plain markdown, at most about 1800 words, with exactly these sections:
+Write it in the first person, as notes to yourself, in plain markdown, at most about 3000 words, with exactly these sections:
 
 ## Where we are
 The current task, its state, what is done / committed / pushed / only local, running helpers or processes (what each does, how it reports), and the next step agreed with the user.
+
+## State and identifiers
+The exact facts the work depends on, copied character for character, never paraphrased: file paths, branches and commit hashes, ids (jobs, runs, messages, PRs), commands that were run or still need running, URLs, config values and numbers that matter. What is running right now (jobs, servers, background tasks): what each is, where it reports, and how to check on it. A dense list is right here.
 
 ## Decisions and why
 Each decision with its reason and who made it, the options turned down and why. Quote the user's own short words where they matter.
@@ -49,7 +52,7 @@ Six to ten short exchanges copied word for word from the conversation, so you me
 ## Where to look
 Details worth looking up in the full transcript rather than carrying here (exact quotes, numbers, long lists, file contents), each with a few words to search for.
 
-Leave out raw tool output, file contents, step-by-step logs and anything the repository or git history already records. Start directly with the first heading.`
+Leave out raw tool output, file contents, step-by-step logs, and anything the repository or git history already records beyond the identifiers above. Start directly with the first heading.`
 
 const SUMMARY_INSTRUCTIONS = `Keep the user's decisions together with their reasons, the options rejected and why, every open thread (running helpers or background tasks, questions waiting on the user, promises, the agreed next steps) and the current state of the work. A separate handoff note, written with the whole conversation in view, is attached after this summary.`
 
