@@ -192,20 +192,63 @@ function checkWords(note: string, messages: readonly SessionMessage[]): { text: 
   return { text: note.slice(0, start) + '\n' + section + (end < note.length ? '\n\n' + note.slice(end) : ''), quotes }
 }
 
+/** How much transcript text the fallback sends, newest kept: about 150K tokens, well inside any session model's window. */
+const TRANSCRIPT_CHARS = 600_000
+
+/** The conversation as plain text: each message's words, a tool call as its name alone (its output is left out). */
+function transcriptText(messages: readonly SessionMessage[]): string {
+  const rows = messages.flatMap((m) => {
+    const tools = m.toolUses.map((t) => `[${t.tool}]`).join(' ')
+    const body = [m.text.trim(), tools].filter(Boolean).join('\n')
+    return body ? [`### ${m.role === 'user' ? 'User' : 'Me'}\n${body}`] : []
+  })
+  let text = rows.join('\n\n')
+  if (text.length > TRANSCRIPT_CHARS) text = '[…the start of the conversation is left out…]\n\n' + text.slice(-TRANSCRIPT_CHARS)
+  return text
+}
+
 /**
- * Asks a fork of the session for the handoff note, checks its quotes against the conversation (`messages`, else the session's
+ * When there is nothing to fork (a resumed process before its first turn ends), the session's own model writes the note
+ * from the transcript's text: no cache to share, no tool outputs, but the same prompt and the same checked quotes.
+ */
+async function fromTranscript($: EngineInterface, messages: readonly SessionMessage[]) {
+  const model = await $.session.model()
+  return $.model.complete({
+    model,
+    system: 'You are Claude, picking up your own long conversation with the user. The transcript below is that conversation as text: "Me" is you. Tool calls show only their names.',
+    prompt: [
+      { text: `<transcript>\n${transcriptText(messages)}\n</transcript>`, cache: true },
+      { text: HANDOFF_PROMPT.replace('The conversation above', 'The conversation in the transcript') },
+    ],
+    maxTokens: 8000,
+    timeoutMs: 300_000,
+  })
+}
+
+/**
+ * Asks a fork of the session for the handoff note (or, with nothing to fork, the session's model over the transcript text), checks its quotes against the conversation (`messages`, else the session's
  * own) and saves it. Undefined when there is nothing to fork or it failed.
  */
 async function writeHandoff($: EngineInterface, why: string, messages?: readonly SessionMessage[]): Promise<{ text: string; file: string; paths: Paths; quotes: Quotes } | undefined> {
   $.ui.status('continuity: writing the handoff note…')
   try {
-    const reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
+    let reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
+    let seen = messages
+    if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
+      // A resumed process has the conversation but no request of its own to fork yet: write from the transcript's text instead.
+      seen ??= await $.session.messages().catch(() => [])
+      if (seen.length) {
+        $.ui.status('continuity: writing the handoff note from the transcript (nothing to fork yet)…')
+        reply = await fromTranscript($, seen)
+        why += ', from the transcript text'
+      }
+    }
     if (!reply.isAnswered) {
       $.ui.log(`continuity: no handoff note (${reply.reason})`)
       return undefined
     }
     if (!reply.text.trim()) return undefined
-    const { text, quotes } = checkWords(reply.text.trim(), messages ?? (await $.session.messages().catch(() => [])))
+    const { text, quotes } = checkWords(reply.text.trim(), seen ?? (await $.session.messages().catch(() => [])))
     const p = await paths($)
     const file = join(p.dir, `handoff-${stamp()}.md`)
     const header = `<!-- continuity handoff, ${why}, ${new Date().toISOString()}; transcript: ${p.transcript ?? 'unknown'} -->\n\n`

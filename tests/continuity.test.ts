@@ -14,8 +14,9 @@ const CHAT: SessionMessage[] = [
 // (the engine hands hooks native paths: compare them with forward slashes)
 const slashes = (p: string) => p.replace(/\\/g, '/')
 
-function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE) {
+function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: SessionMessage[] = CHAT) {
   const writes: { path: string; text: string }[] = []
+  const completes: { model: string; prompt: string }[] = []
   const compactions: { instructions?: string }[] = []
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\work\\demo' }))
@@ -39,8 +40,13 @@ function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE) {
     compactions.push({ instructions: e.instructions })
     return { messages: [SUMMARY] }
   })
-  on('session.messages', () => ({ value: CHAT }))
-  return { writes, compactions }
+  on('session.messages', () => ({ value: chat }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('model.complete', (_, e) => {
+    completes.push({ model: e.model, prompt: String(e.prompt) })
+    return { value: { isAnswered: true, text: note, usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
+  })
+  return { writes, compactions, completes }
 }
 
 // A note whose quotes are right but for case and curly quotes, trimmed with "…", or made up.
@@ -108,13 +114,26 @@ test('a compaction keeps the handoff note right after the summary, as Claude spe
   expect(paths.some((p) => /compaction-.*\.json$/.test(p))).toBe(true)
 })
 
-test('with nothing to fork, the compaction is the engine’s own, still with the standing instructions', async ($, on) => {
-  const { writes, compactions } = engine(on, 'nothing-to-fork')
+test('with nothing to fork (a resumed process), the session model writes the note from the transcript text', async ($, on) => {
+  const { writes, compactions, completes } = engine(on, 'nothing-to-fork')
 
-  const result = await $.session.compact({ trigger: 'auto', messages: CHAT })
+  const result = await $.session.compact({ trigger: 'manual', messages: CHAT })
 
-  expect(result.messages?.length).toBe(1)
+  expect(completes.length).toBe(1)
+  expect(completes[0]?.model).toBe('claude-opus-5-5')
+  expect(completes[0]?.prompt).toContain('the lake, not the park')
+  expect(result.messages?.length).toBe(2)
+  expect(writes.some((w) => w.text.includes('from the transcript text') && w.text.includes('Planning a picnic'))).toBe(true)
   expect(compactions[0]?.instructions).toContain('open thread')
+})
+
+test('with nothing to fork and no transcript, /handoff writes nothing', async ($, on) => {
+  const { writes, completes } = engine(on, 'nothing-to-fork', NOTE, [])
+
+  const { text } = await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+
+  expect(completes.length).toBe(0)
+  expect(text).toContain('No handoff note')
   expect(writes.length).toBe(0)
 })
 
