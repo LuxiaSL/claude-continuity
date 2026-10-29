@@ -14,9 +14,10 @@ const CHAT: SessionMessage[] = [
 // (the engine hands hooks native paths: compare them with forward slashes)
 const slashes = (p: string) => p.replace(/\\/g, '/')
 
-function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: SessionMessage[] = CHAT) {
+function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: SessionMessage[] = CHAT, marks = '') {
   const writes: { path: string; text: string }[] = []
   const completes: { model: string; prompt: string }[] = []
+  const forks: string[] = []
   const compactions: { instructions?: string }[] = []
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\work\\demo' }))
@@ -24,13 +25,14 @@ function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: 
   on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:\\Users\\T' : undefined }))
   on('fs.exists', (_, e) => ({ value: slashes(e.path).endsWith('/.claude/projects/C--work-demo/sess-1.jsonl') }))
   on('fs.list', () => ({ value: [] }))
+  on('fs.read', (_, e) => ({ value: slashes(e.path).endsWith('/marks.jsonl') ? marks : '' }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('fs.write', (_, e) => {
     writes.push(e)
     return { value: undefined }
   })
-  on('model.fork', () => ({
+  on('model.fork', (_, e) => (forks.push(e.prompt), {
     value:
       fork === 'answers'
         ? { isAnswered: true, text: note, usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
@@ -46,7 +48,7 @@ function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: 
     completes.push({ model: e.model, prompt: String(e.prompt) })
     return { value: { isAnswered: true, text: note, usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
   })
-  return { writes, compactions, completes }
+  return { writes, compactions, completes, forks }
 }
 
 // A note whose quotes are right but for case and curly quotes, trimmed with "…", or made up.
@@ -145,4 +147,17 @@ test('a subagent’s own compaction passes through untouched', async ($, on) => 
   expect(result.messages?.length).toBe(1)
   expect(compactions[0]?.instructions).toBe(undefined)
   expect(writes.length).toBe(0)
+})
+
+
+test('marks made during the session are copied into the note verbatim, and the writer is told', async ($, on) => {
+  const marks = '{"ts":"2026-10-29T03:12:00Z","text":"the lake, not the park","said_by":"Sam","why":"the park is being reseeded"}\n{"text":  ""}\nnot json\n'
+  const { writes, forks } = engine(on, 'answers', NOTE, CHAT, marks)
+
+  const { text } = await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+
+  expect(text).toContain('Handoff note written')
+  expect(forks[0]).toContain('1 moment was marked')
+  const latest = writes.find((w) => slashes(w.path).endsWith('/latest.md'))
+  expect(latest?.text).toContain('## Marked to keep\n> the lake, not the park\n— Sam, 2026-10-29 03:12 · the park is being reseeded')
 })

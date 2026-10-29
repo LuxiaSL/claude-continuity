@@ -211,18 +211,56 @@ function transcriptText(messages: readonly SessionMessage[]): string {
  * When there is nothing to fork (a resumed process before its first turn ends), the session's own model writes the note
  * from the transcript's text: no cache to share, no tool outputs, but the same prompt and the same checked quotes.
  */
-async function fromTranscript($: EngineInterface, messages: readonly SessionMessage[]) {
+async function fromTranscript($: EngineInterface, messages: readonly SessionMessage[], prompt: string) {
   const model = await $.session.model()
   return $.model.complete({
     model,
     system: 'You are Claude, picking up your own long conversation with the user. The transcript below is that conversation as text: "Me" is you. Tool calls show only their names.',
     prompt: [
       { text: `<transcript>\n${transcriptText(messages)}\n</transcript>`, cache: true },
-      { text: HANDOFF_PROMPT.replace('The conversation above', 'The conversation in the transcript') },
+      { text: prompt.replace('The conversation above', 'The conversation in the transcript') },
     ],
     maxTokens: 8000,
     timeoutMs: 300_000,
   })
+}
+
+type Mark = { ts?: string; text: string; said_by?: string; why?: string }
+const MAX_MARKS = 40
+
+/**
+ * Marks: moments flagged during the session as needing to survive word for word (written by a tool such as
+ * orchestra's `mark`, one JSON object per line in <continuity dir>/marks.jsonl). They are copied into the note
+ * by this code, not by the model, so their wording can't drift; the note's writer is told they are there.
+ */
+async function readMarks($: EngineInterface, dir: string): Promise<Mark[]> {
+  const raw = await $.fs.read(join(dir, 'marks.jsonl')).catch(() => '')
+  if (typeof raw !== 'string' || !raw) return []
+  const marks: Mark[] = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const m = JSON.parse(line) as Mark
+      if (m && typeof m.text === 'string' && m.text.trim()) marks.push(m)
+    } catch {
+      // a torn line: skip it
+    }
+  }
+  return marks.slice(-MAX_MARKS)
+}
+
+function marksPrompt(marks: readonly Mark[]): string {
+  if (!marks.length) return ''
+  return `\n\n${marks.length} moment${marks.length > 1 ? 's were' : ' was'} marked during the session to keep word for word. They are appended to your note exactly as written, under "## Marked to keep", so don't copy them; where one bears on a section, say briefly what it was about and why it mattered.`
+}
+
+function marksSection(marks: readonly Mark[]): string {
+  if (!marks.length) return ''
+  const rows = marks.map((m) => {
+    const by = [m.said_by, m.ts ? m.ts.slice(0, 16).replace('T', ' ') : undefined].filter(Boolean).join(', ')
+    return `> ${m.text.trim().replace(/\n/g, '\n> ')}\n${by || m.why ? `— ${by}${m.why ? `${by ? ' · ' : ''}${m.why}` : ''}` : ''}`.trimEnd()
+  })
+  return `\n\n## Marked to keep\n${rows.join('\n\n')}`
 }
 
 /**
@@ -232,14 +270,17 @@ async function fromTranscript($: EngineInterface, messages: readonly SessionMess
 async function writeHandoff($: EngineInterface, why: string, messages?: readonly SessionMessage[]): Promise<{ text: string; file: string; paths: Paths; quotes: Quotes } | undefined> {
   $.ui.status('continuity: writing the handoff note…')
   try {
-    let reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
+    const p = await paths($)
+    const marks = await readMarks($, p.dir)
+    const prompt = HANDOFF_PROMPT + marksPrompt(marks)
+    let reply = await $.model.fork({ prompt })
     let seen = messages
     if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
       // A resumed process has the conversation but no request of its own to fork yet: write from the transcript's text instead.
       seen ??= await $.session.messages().catch(() => [])
       if (seen.length) {
         $.ui.status('continuity: writing the handoff note from the transcript (nothing to fork yet)…')
-        reply = await fromTranscript($, seen)
+        reply = await fromTranscript($, seen, prompt)
         why += ', from the transcript text'
       }
     }
@@ -248,8 +289,9 @@ async function writeHandoff($: EngineInterface, why: string, messages?: readonly
       return undefined
     }
     if (!reply.text.trim()) return undefined
-    const { text, quotes } = checkWords(reply.text.trim(), seen ?? (await $.session.messages().catch(() => [])))
-    const p = await paths($)
+    const checked = checkWords(reply.text.trim(), seen ?? (await $.session.messages().catch(() => [])))
+    const { quotes } = checked
+    const text = checked.text + marksSection(marks)
     const file = join(p.dir, `handoff-${stamp()}.md`)
     const header = `<!-- continuity handoff, ${why}, ${new Date().toISOString()}; transcript: ${p.transcript ?? 'unknown'} -->\n\n`
     await $.fs.write(file, header + text + '\n')
