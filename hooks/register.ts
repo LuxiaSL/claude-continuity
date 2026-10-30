@@ -157,14 +157,14 @@ function verbatim(quote: string, sources: readonly Source[]): string | undefined
 
 const WORDS_HEADING = /^##\s+In our own words[ \t]*$/im
 
-type Quotes = { found: number; total: number }
+type Quotes = { found: number; total: number; dropped?: string[] }
 
 /**
  * Checks the note's "In our own words" lines against the conversation: a line found there is kept with the conversation's own
  * characters, one that is not is left out, and a closing line says how many were found.
  */
-function checkWords(note: string, messages: readonly SessionMessage[]): { text: string; quotes: Quotes } {
-  const quotes = { found: 0, total: 0 }
+function checkWords(note: string, messages: readonly SessionMessage[], heard: readonly string[] = []): { text: string; quotes: Quotes } {
+  const quotes: Quotes = { found: 0, total: 0, dropped: [] }
   const head = WORDS_HEADING.exec(note)
   if (!head) return { text: note, quotes }
   const start = head.index + head[0].length
@@ -181,10 +181,16 @@ function checkWords(note: string, messages: readonly SessionMessage[]): { text: 
       quotes.total++
       const label = q[1]?.trim()
       const role: SessionMessage['role'] = label === undefined ? 'user' : /^(me|claude)$/i.test(label) ? 'assistant' : 'user'
-      sources ??= messages.filter((m) => m.text).map((m) => ({ role: m.role, text: m.text, folded: fold(m.text) }))
+      sources ??= [
+        ...messages.filter((m) => m.text).map((m) => ({ role: m.role, text: m.text, folded: fold(m.text) })),
+        ...heard.map((text): Source => ({ role: 'user', text, folded: fold(text) })),
+      ]
       const order = [...sources.filter((s) => s.role === role), ...sources.filter((s) => s.role !== role)]
       const words = verbatim(said, order) ?? verbatim(said.replace(/^["“]([\s\S]*)["”]$/, '$1'), order)
-      if (words === undefined) return []
+      if (words === undefined) {
+        quotes.dropped!.push(line)
+        return []
+      }
       quotes.found++
       return [label === undefined ? `> ${words}` : `> **${label}:** ${words}`]
     })
@@ -252,6 +258,27 @@ async function readMarks($: EngineInterface, dir: string): Promise<Mark[]> {
   return marks.slice(-MAX_MARKS)
 }
 
+/**
+ * Messages that reached the session from outside its typed turns, such as a bus's channel pushes (orchestra writes each one to
+ * <continuity dir>/channel.jsonl as `{ text }`). The engine files those turns apart from the conversation's, so a note quoting
+ * one would otherwise have the quote left out as not found.
+ */
+async function readHeard($: EngineInterface, dir: string): Promise<string[]> {
+  const raw = await $.fs.read(join(dir, 'channel.jsonl')).catch(() => '')
+  if (typeof raw !== 'string' || !raw) return []
+  const heard: string[] = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const m = JSON.parse(line) as { text?: unknown }
+      if (m && typeof m.text === 'string' && m.text.trim()) heard.push(m.text)
+    } catch {
+      // a torn line: skip it
+    }
+  }
+  return heard
+}
+
 function marksPrompt(marks: readonly Mark[]): string {
   if (!marks.length) return ''
   return `\n\n${marks.length} moment${marks.length > 1 ? 's were' : ' was'} marked during the session to keep word for word. They are appended to your note exactly as written, under "## Marked to keep", so don't copy them; where one bears on a section, say briefly what it was about and why it mattered.`
@@ -292,13 +319,17 @@ async function writeHandoff($: EngineInterface, why: string, messages?: readonly
       return undefined
     }
     if (!reply.text.trim()) return undefined
-    const checked = checkWords(reply.text.trim(), seen ?? (await $.session.messages().catch(() => [])))
+    const checked = checkWords(reply.text.trim(), seen ?? (await $.session.messages().catch(() => [])), await readHeard($, p.dir))
     const { quotes } = checked
     const text = checked.text + marksSection(marks)
     const file = join(p.dir, `handoff-${stamp()}.md`)
     const header = `<!-- continuity handoff, ${why}, ${new Date().toISOString()}; transcript: ${p.transcript ?? 'unknown'} -->\n\n`
     await $.fs.write(file, header + text + '\n')
     await $.fs.write(join(p.dir, 'latest.md'), header + text + '\n')
+    if (quotes.dropped?.length) {
+      // the lines left out, so a miss can be traced (a quote that was reworded, or a message the check could not see)
+      await $.fs.write(file.replace(/\.md$/, '.dropped.md'), quotes.dropped.join('\n\n') + '\n').catch(() => undefined)
+    }
     return { text, file, paths: p, quotes }
   } finally {
     $.ui.status(undefined)

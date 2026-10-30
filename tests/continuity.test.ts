@@ -14,7 +14,7 @@ const CHAT: SessionMessage[] = [
 // (the engine hands hooks native paths: compare them with forward slashes)
 const slashes = (p: string) => p.replace(/\\/g, '/')
 
-function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: SessionMessage[] = CHAT, marks = '') {
+function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: SessionMessage[] = CHAT, marks = '', heard = '') {
   const writes: { path: string; text: string }[] = []
   const completes: { model: string; prompt: string }[] = []
   const forks: string[] = []
@@ -25,7 +25,7 @@ function engine(on: On, fork: 'answers' | 'nothing-to-fork', note = NOTE, chat: 
   on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:\\Users\\T' : undefined }))
   on('fs.exists', (_, e) => ({ value: slashes(e.path).endsWith('/.claude/projects/C--work-demo/sess-1.jsonl') }))
   on('fs.list', () => ({ value: [] }))
-  on('fs.read', (_, e) => ({ value: slashes(e.path).endsWith('/marks.jsonl') ? marks : '' }))
+  on('fs.read', (_, e) => ({ value: slashes(e.path).endsWith('/marks.jsonl') ? marks : slashes(e.path).endsWith('/channel.jsonl') ? heard : '' }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('fs.write', (_, e) => {
@@ -160,4 +160,17 @@ test('marks made during the session are copied into the note verbatim, and the w
   expect(forks[0]).toContain('1 moment was marked')
   const latest = writes.find((w) => slashes(w.path).endsWith('/latest.md'))
   expect(latest?.text).toContain('## Marked to keep\n> the lake, not the park\n— Sam, 2026-10-29 03:12 · the park is being reseeded')
+})
+
+test('a quote of a message pushed over a channel is found in channel.jsonl, and the lines left out are saved', async ($, on) => {
+  const heard = '{"ts":"2026-10-29T20:24:20Z","from":"sam","kind":"notice","text":"ok lets go with sandwiches... and lemonade :)"}\ntorn\n'
+  const { writes } = engine(on, 'answers', WORDS_NOTE, CHAT, '', heard)
+
+  const { text } = await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+
+  expect(text).toContain('(3 of 4 quoted lines found word for word)')
+  const latest = writes.find((w) => slashes(w.path).endsWith('/latest.md'))?.text ?? ''
+  expect(latest).toContain('> **Sam:** ok lets go with sandwiches... and lemonade :)')
+  const dropped = writes.find((w) => slashes(w.path).endsWith('.dropped.md'))?.text ?? ''
+  expect(dropped).toContain('Sandwiches are a fine choice!')
 })
