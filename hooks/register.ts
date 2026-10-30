@@ -279,6 +279,21 @@ async function readHeard($: EngineInterface, dir: string): Promise<string[]> {
   return heard
 }
 
+type Cost = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+
+/**
+ * What a model call made for continuity cost, appended to <continuity dir>/costs.jsonl: the note's fork (which should read the
+ * session's prompt cache), the transcript fallback (no cache to share), and the compaction's own summary request. None of these
+ * reach the session transcript, so without this they're invisible to anything totting up usage.
+ */
+async function recordCost($: EngineInterface, dir: string, what: 'note' | 'note-transcript' | 'compaction', why: string, usage: Cost | undefined) {
+  if (!usage) return
+  const row = { ts: new Date().toISOString(), what, why, model: await $.session.model().catch(() => undefined), usage }
+  const old = await $.fs.read(join(dir, 'costs.jsonl')).catch(() => '')
+  const kept = (typeof old === 'string' ? old : '').split('\n').filter(Boolean).slice(-499)
+  await $.fs.write(join(dir, 'costs.jsonl'), [...kept, JSON.stringify(row)].join('\n') + '\n').catch(() => undefined)
+}
+
 function marksPrompt(marks: readonly Mark[]): string {
   if (!marks.length) return ''
   return `\n\n${marks.length} moment${marks.length > 1 ? 's were' : ' was'} marked during the session to keep word for word. They are appended to your note exactly as written, under "## Marked to keep", so don't copy them; where one bears on a section, say briefly what it was about and why it mattered.`
@@ -304,6 +319,7 @@ async function writeHandoff($: EngineInterface, why: string, messages?: readonly
     const marks = await readMarks($, p.dir)
     const prompt = HANDOFF_PROMPT + marksPrompt(marks)
     let reply = await $.model.fork({ prompt })
+    let what: 'note' | 'note-transcript' = 'note'
     let seen = messages
     if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
       // A resumed process has the conversation but no request of its own to fork yet: write from the transcript's text instead.
@@ -311,9 +327,11 @@ async function writeHandoff($: EngineInterface, why: string, messages?: readonly
       if (seen.length) {
         $.ui.status('continuity: writing the handoff note from the transcript (nothing to fork yet)…')
         reply = await fromTranscript($, seen, prompt)
+        what = 'note-transcript'
         why += ', from the transcript text'
       }
     }
+    if (reply.isAnswered) await recordCost($, p.dir, what, why, reply.usage)
     if (!reply.isAnswered) {
       $.ui.log(`continuity: no handoff note (${reply.reason})`)
       return undefined
@@ -365,6 +383,7 @@ export const register: Register = (on) => {
 
     const instructions = [e.instructions?.trim(), SUMMARY_INSTRUCTIONS].filter(Boolean).join('\n\n')
     const result = await next({ ...e, instructions })
+    if (result.skip === undefined && result.usage) await recordCost($, (await paths($)).dir, 'compaction', e.trigger, result.usage).catch(() => undefined)
     if (result.skip !== undefined || !handoff) return result
 
     // The note follows the summary as the next turn: Claude's own message after a user-side summary, else a user-side one.

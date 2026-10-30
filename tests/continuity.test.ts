@@ -174,3 +174,13 @@ test('a quote of a message pushed over a channel is found in channel.jsonl, and 
   const dropped = writes.find((w) => slashes(w.path).endsWith('.dropped.md'))?.text ?? ''
   expect(dropped).toContain('Sandwiches are a fine choice!')
 })
+
+test('what each note costs is logged to costs.jsonl: the fork, or the transcript fallback', async ($, on) => {
+  const { writes } = engine(on, 'answers')
+  await $.command.run({ command: 'handoff', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  const cost = writes.find((w) => slashes(w.path).endsWith('/costs.jsonl'))?.text ?? ''
+  const row = JSON.parse(cost.trim().split('\n').at(-1) ?? '{}')
+  expect(row.what).toBe('note')
+  expect(row.usage.output_tokens).toBe(20)
+  expect(row.model).toBe('claude-opus-5-5')
+})
