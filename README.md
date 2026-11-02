@@ -19,17 +19,27 @@ When a conversation fills the context window, Claude Code compacts it: everythin
 
 `/handoff` writes a note on demand, without compacting: a checkpoint you can read. It says how many quoted lines were found word for word.
 
-If anything fails (there is nothing to fork yet, the model doesn't answer, an error), the compaction is Claude Code's own, as if the plugin weren't there. A subagent's own compactions pass through untouched.
+A session that was just resumed has nothing to fork until its first turn ends. In that case, the session's own model writes the note from the transcript's text instead. If anything else fails (the model doesn't answer, an error), the compaction is Claude Code's own, as if the plugin weren't there. A subagent's own compactions pass through untouched.
+
+## What this fork adds
+
+This is [LuxiaSL](https://github.com/LuxiaSL)'s fork of [gabriel-berzescu/claude-continuity](https://github.com/gabriel-berzescu/claude-continuity). It adds the following, all tested with `claude plugin test .`:
+
+- **A note even right after a resume.** Upstream writes no note when there is nothing to fork (a resumed process before its first turn ends). This fork has the session's model write the note from the transcript's text instead, and its header names the fallback.
+- **A "State and identifiers" section**, and a budget of about 3,000 words. The note keeps exact ids, paths, branches, commands and numbers, which summaries tend to drop. In a test over 25 real compactions, a session kept 66% of what mattered from the summary alone and 88% with the note.
+- **Marks.** A tool, such as [orchestra](https://github.com/LuxiaSL/orchestration)'s `mark()`, can append moments that must survive word for word to `<continuity dir>/marks.jsonl`. The plugin copies them into the next note under "Marked to keep". The plugin's code copies them, not the model, so the wording can't drift.
+- **Quotes from messages that arrive over a channel.** Messages pushed into a session over an MCP channel are kept apart from typed turns, so quoting one used to fail the check. The plugin now also checks quotes against `<continuity dir>/channel.jsonl`, which orchestra writes. Lines that are left out are saved beside the note as `handoff-*.dropped.md`.
+- **Cost records.** No transcript records the note's fork, the fallback, or the compaction's own summary request. The plugin appends each one's token usage, cache reads and writes included, to `<continuity dir>/costs.jsonl`.
 
 ## Install
 
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install continuity --marketplace gabriel-berzescu/claude-continuity
+/plugin install continuity --marketplace LuxiaSL/claude-continuity
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user, so it runs in every session). From a shell, use `claude plugin install continuity --marketplace gabriel-berzescu/claude-continuity`. In the desktop app, where `/plugin` does not run, click + next to the prompt box, then Plugins, Add marketplace with `gabriel-berzescu/claude-continuity`, then Add plugin.
+Answer `y` to add the marketplace, then pick a scope (user, so it runs in every session). From a shell, use `claude plugin install continuity --marketplace LuxiaSL/claude-continuity`. In the desktop app, where `/plugin` does not run, click + next to the prompt box, then Plugins, Add marketplace with `LuxiaSL/claude-continuity`, then Add plugin. For the original plugin, use `gabriel-berzescu/claude-continuity` instead.
 
 While developing, load it from a working copy instead: `claude --plugin-dir <path to this folder>`, or name the folder in `CLAUDE_CODE_PLUGIN_DIRS`.
 
@@ -42,7 +52,7 @@ It is a hooks module (a "mod"), built on Claude Code's early-access function-hoo
 
 ## What it costs
 
-At each compaction, one extra model request over the transcript (mostly read from the prompt cache) and a note of about 1,800 words. Checking the quotes takes a few tens of milliseconds, even over a long session. `/handoff` costs the same.
+At each compaction, one extra model request over the transcript (mostly read from the prompt cache) and a note of about 2,000 to 2,500 words. The fallback after a resume has no cache to share, so it reads up to about 150K tokens of transcript text. `costs.jsonl` records what each request used. Checking the quotes takes a few tens of milliseconds, even over a long session. `/handoff` costs the same.
 
 ## Develop
 
